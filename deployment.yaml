@@ -1,0 +1,230 @@
+---
+# ── Namespace (falls noch nicht vorhanden) ────────────────────────────────────
+# Der Webhook muss im selben Namespace wie cert-manager laufen.
+# Falls cert-manager bereits installiert ist, diesen Teil weglassen.
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-webhook-http
+  namespace: cert-manager
+  labels:
+    app: cert-manager-webhook-http
+
+---
+# ── RBAC: Webhook darf Secrets im eigenen Namespace lesen ─────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-manager-webhook-http:secrets
+  namespace: cert-manager
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-manager-webhook-http:secrets
+  namespace: cert-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cert-manager-webhook-http:secrets
+subjects:
+  - apiGroup: ""
+    kind: ServiceAccount
+    name: cert-manager-webhook-http
+    namespace: cert-manager
+
+---
+# ── RBAC: cert-manager darf den Webhook aufrufen ──────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-webhook-http:domain-solver
+rules:
+  - apiGroups:
+      - acme.yourdomain.com   # <-- GROUP_NAME anpassen!
+    resources: ["*"]
+    verbs: ["create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-webhook-http:domain-solver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-webhook-http:domain-solver
+subjects:
+  - apiGroup: ""
+    kind: ServiceAccount
+    name: cert-manager
+    namespace: cert-manager
+
+---
+# ── RBAC: cert-manager darf Webhook-Flow-Secrets im eigenen NS anlegen ────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-manager-webhook-http:auth-delegator
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - apiGroup: ""
+    kind: ServiceAccount
+    name: cert-manager-webhook-http
+    namespace: cert-manager
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-manager-webhook-http:webhook-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - apiGroup: ""
+    kind: ServiceAccount
+    name: cert-manager-webhook-http
+    namespace: cert-manager
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager-webhook-http
+  namespace: cert-manager
+  labels:
+    app: cert-manager-webhook-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cert-manager-webhook-http
+  template:
+    metadata:
+      labels:
+        app: cert-manager-webhook-http
+    spec:
+      serviceAccountName: cert-manager-webhook-http
+      containers:
+        - name: webhook
+          image: youorg/cert-manager-webhook-http:latest  # <-- Image anpassen!
+          imagePullPolicy: IfNotPresent
+          args:
+            - --tls-cert-file=/tls/tls.crt
+            - --tls-private-key-file=/tls/tls.key
+          env:
+            - name: GROUP_NAME
+              value: "acme.yourdomain.com"  # <-- GROUP_NAME anpassen!
+          ports:
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: https
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: https
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: certs
+              mountPath: /tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: certs
+          secret:
+            secretName: cert-manager-webhook-http-tls  # wird von cert-manager injiziert
+
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: cert-manager-webhook-http
+  namespace: cert-manager
+  labels:
+    app: cert-manager-webhook-http
+spec:
+  selector:
+    app: cert-manager-webhook-http
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+
+---
+# ── APIService: registriert den Webhook als K8s-Extension-API ─────────────────
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.acme.yourdomain.com   # <-- GROUP_NAME anpassen!
+  labels:
+    app: cert-manager-webhook-http
+  annotations:
+    cert-manager.io/inject-ca-from: "cert-manager/cert-manager-webhook-http-tls"
+spec:
+  group: acme.yourdomain.com           # <-- GROUP_NAME anpassen!
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: cert-manager-webhook-http
+    namespace: cert-manager
+  version: v1alpha1
+  insecureSkipTLSVerify: false
+
+---
+# ── TLS-Zertifikat für den Webhook (via cert-manager selbst) ──────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cert-manager-webhook-http-tls
+  namespace: cert-manager
+spec:
+  secretName: cert-manager-webhook-http-tls
+  dnsNames:
+    - cert-manager-webhook-http
+    - cert-manager-webhook-http.cert-manager
+    - cert-manager-webhook-http.cert-manager.svc
+    - cert-manager-webhook-http.cert-manager.svc.cluster.local
+  issuerRef:
+    name: cert-manager-webhook-selfsign   # nutzt den unten definierten Self-Sign-Issuer
+    kind: Issuer
+
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cert-manager-webhook-selfsign
+  namespace: cert-manager
+spec:
+  selfSigned: {}

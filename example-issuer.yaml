@@ -1,0 +1,75 @@
+---
+# ── Secret mit API-Credentials ────────────────────────────────────────────────
+# Lege den Secret in dem Namespace an, in dem dein Zertifikat/Issuer liegt.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hosting-api-credentials
+  namespace: cert-manager      # ggf. anpassen
+type: Opaque
+stringData:
+  token: "dein-api-token-hier"
+  username: "dein-username-hier"
+
+---
+# ── ClusterIssuer mit HTTP-Webhook-Solver ─────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: deine@email.de
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.yourdomain.com   # muss mit GROUP_NAME im Deployment übereinstimmen
+            solverName: http-solver
+            config:
+              # URL-Template für das Hinzufügen des TXT-Records.
+              # Verfügbare Platzhalter:
+              #   {token}    - API-Token (aus Secret oder statisch)
+              #   {username} - Benutzername (aus Secret oder statisch)
+              #   {record}   - FQDN des TXT-Records ohne trailing dot
+              #   {zone}     - DNS-Zone ohne trailing dot
+              #   {fqdn}     - voller FQDN mit trailing dot (wie cert-manager ihn liefert)
+              #   {key}      - ACME-Challenge-Wert (Inhalt des TXT-Records)
+              presentUrl: "https://api.best.hosting/api/bla?action=add&token={token}&user={username}&record={record}&zone={zone}&key={key}"
+              cleanupUrl: "https://api.best.hosting/api/bla?action=del&token={token}&user={username}&record={record}&zone={zone}"
+              
+              
+              # HTTP-Methode: GET (Standard) oder POST
+              method: GET
+
+              # Credentials aus Kubernetes-Secret laden:
+              tokenSecretRef:
+                name: hosting-api-credentials
+                key: token
+              usernameSecretRef:
+                name: hosting-api-credentials
+                key: username
+
+              # Optional: Welche HTTP-Status-Codes gelten als Erfolg? Default: [200]
+              successCodes: [200, 201, 204]
+
+              # Optional: Timeout in Sekunden. Default: 10
+              timeoutSeconds: 15
+
+---
+# ── Beispiel-Zertifikat ───────────────────────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: example-tls
+  namespace: default
+spec:
+  secretName: example-tls
+  dnsNames:
+    - "example.yourdomain.com"
+    - "*.example.yourdomain.com"
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
